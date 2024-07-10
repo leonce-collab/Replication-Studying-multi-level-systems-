@@ -1,0 +1,339 @@
+---
+title: "Replication code for positions validation - BJPS"
+format: html
+editor: visual
+author: Leonce Röth
+---
+
+# Replication code for positions validation - BJPS
+
+This code replicates the validation of party positions across levels as proposed in the BJPS article and the related launch of the data set.
+
+## Loading the packages
+
+-   Please install them first if needed!
+
+```{r}
+
+library(data.table)
+library(tidyr)
+library(dplyr)
+library(writexl)
+library(ggplot2)
+library(haven)
+```
+
+## Loading the Data
+
+The positional data are estimated as follows:
+
+-   data set: merged_manifestos.dta is a by hand harmonized dataset of regional and country-level manifestos.
+
+-   This data set is used in STATA with the replication_positions_common_space_new.do to estimate the different item reponse models.
+
+-   The dataset is splitted into a regional and national dataset, in order to be remerged here.
+
+```{r}
+
+# We load the regional positions based on RMP
+
+dta <- read_dta("adjust file path for subset_region.dta")
+# Convert party to character type in dta dataframe
+dta <- dta %>% mutate(party = as.character(party))
+
+merged_pos <- readRDS("adjust file path for merged_pos.rds")
+
+# Remove duplicates based on "year", "ml_ir.y", and "party"
+cleaned_merged_pos <- distinct(merged_pos, year, ml_ir.y,ml_ir.x, party, .keep_all = TRUE)
+
+# Output cleaned_merged_pos
+print(cleaned_merged_pos)
+
+# Rename the variable from region to Region
+dta <- dta %>%
+  rename(Region = region)
+
+# Merge only "culture_reg" and "market_reg" from dta into cleaned_merged_pos based on identifiers "party", "year", and "region"
+merged_data <- cleaned_merged_pos %>%
+  left_join(select(dta, party, year, Region, culture_reg, market_reg, regionalist), 
+            by = c("party", "year", "Region"))
+
+# Output merged_data
+print(merged_data)
+
+
+# Now we have data set where regional and national riles as well as the market liberalism positions are matched. 
+
+
+
+
+# Count the number of unique party IDs in merged_data
+unique_party_count <- length(unique(merged_data$party))
+
+# Print the count
+print(unique_party_count)
+
+# Thus keep in mind we have 62 unique parties on the regional level
+
+# Remove multiple data frames
+rm(dta, merged_pos, cleaned_merged_pos)
+```
+
+-   Now we add the national positions based on the new IR models conducted in STATA (see reproduction of IR-positions).
+
+```{r}
+# Now we need to load the newly generated cultural and market positions
+
+
+dta2 <- read_dta("adjust file path for subset_national.dta")
+# Convert party to character type in dta dataframe
+dta2 <- dta2 %>% mutate(party = as.character(party))
+
+
+# Find the common party IDs between merged_data and dta2
+common_party_ids <- intersect(merged_data$party, dta2$party)
+
+# Count the unique party IDs in the intersection
+count_common_party_ids <- length(unique(common_party_ids))
+
+# Print the count
+print(count_common_party_ids)
+
+
+
+
+```
+
+## Creating the matching function
+
+-   Here we create a nearest temporal match between the two data sets. The year of the national manifesto is defined by the nearest temporal match in the regional data based on the same party id. We write a function that prefers the past over the future when both have the same distance.
+
+    ```{r}
+
+    # Convert data frames to data tables
+    setDT(merged_data)
+    setDT(dta2)
+
+    # Set key for merged_data
+    setkey(merged_data, party, year)
+
+    # Function to find the nearest year match per party and year
+    nearest_year_match <- function(x, y) {
+      # Initialize vector to store nearest years
+      nearest_years <- numeric(nrow(y))
+      
+      # Iterate over each row in y
+      for (i in seq_len(nrow(y))) {
+        # Find the indices of the nearest year(s) in x for the current row in y
+        idx <- x[y[i], on = .(party, year), roll = "nearest", which = TRUE]
+        
+        # If multiple equally nearest matches exist, choose the one with the smaller year in merged_data
+        if (length(idx) > 1) {
+          min_year_idx <- which.min(x$year[idx])
+          idx <- idx[min_year_idx]
+        }
+        
+        # Store the nearest year
+        nearest_years[i] <- x$year[idx]
+      }
+      
+      return(nearest_years)
+    }
+
+    # Add nearest_year column to merged_data
+    merged_data[, nearest_year := nearest_year_match(dta2, merged_data)]
+
+    ```
+
+    Visual inspection of example matches.
+
+    ```{r}
+    # Filter merged_data for the Region Scotland
+    scotland_data <- merged_data[Region == "Scotland"]
+
+    # List the year, party, and nearest_year for all parties in the Region Scotland
+    scotland_party_info <- scotland_data[, .(year, party, nearest_year)]
+
+    # Output the list
+    print(scotland_party_info)
+
+    ```
+
+    ## Merging of regional and national data
+
+    -   Merging of data
+
+    ```{r}
+
+
+    # Merge dta2 into merged_data based on party and nearest_year = year
+    merged_data_matched <- merge(merged_data, dta2, by.x = c("party", "nearest_year"), by.y = c("party", "year"), all.x = TRUE)
+
+
+    # Remove multiple data frames
+    rm(dta2, merged_data, merged_data_matched_unique, scotland_data, scotland_party_info)
+
+    ```
+
+-   Here we we generate the general left and right dimension based on the addition of the IR-positions for the cultural and economic dimension.
+
+    ```{r}
+    # Generate IR left right measure
+
+    merged_data_matched <- merged_data_matched %>%
+      mutate(lr_ir_nat = market_nat + culture_nat*(-1))
+
+    merged_data_matched <- merged_data_matched %>%
+      mutate(lr_ir_reg = market_reg + culture_reg*(-1))
+    ```
+
+    Here we re-scale the positions to improve comparability
+
+    ```{r}
+
+    # Function to perform min-max scaling
+    min_max_scale <- function(x) {
+      (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+    }
+
+    # List of variables to standardize
+    variables_to_scale <- c("culture_nat", "market_nat", "market_reg", "culture_reg", "rile", "RILE_position", "lr_ir_nat", "lr_ir_reg")
+
+    # Apply min-max scaling to selected variables in your data frame
+    merged_data_matched[, variables_to_scale] <- lapply(merged_data_matched[, variables_to_scale, with = FALSE], min_max_scale)
+    ```
+
+    Here we check the temporal distance of the matches
+
+    ```{r}
+    # Calculate absolute distance between year and nearest_year
+    merged_data_matched$year_distance <- abs(merged_data_matched$year - merged_data_matched$nearest_year)
+    # Create a histogram of year_distance
+    hist(merged_data_matched$year_distance, main = "Histogram of Year Distance", xlab = "Year Distance")
+
+
+    ```
+
+    Here, we limit our sample to matches with distance \< 6. and run the correlations.
+
+    ```{r}
+
+    # Filter observations with year_distance < 6
+    filtered_data <- merged_data_matched[merged_data_matched$year_distance < 6, ]
+
+    # Calculate correlations
+    correlation_market <- cor(filtered_data$market_reg, filtered_data$market_nat, use = "complete.obs")
+    correlation_culture <- cor(filtered_data$culture_reg, filtered_data$culture_nat, use = "complete.obs")
+    correlation_rile <- cor(filtered_data$rile, filtered_data$RILE_position, use = "complete.obs")
+    correlation_lr <- cor(filtered_data$lr_ir_nat, filtered_data$lr_ir_reg, use = "complete.obs")
+    correlation_reg <- cor(filtered_data$culture_reg, filtered_data$market_reg, use = "complete.obs")
+    correlation_nat <- cor(filtered_data$market_nat, filtered_data$culture_nat, use = "complete.obs")
+
+    # Count the number of observations for each pair of variables
+    n_obs_market <- sum(!is.na(merged_data_matched$market_reg) & !is.na(merged_data_matched$market_nat))
+    n_obs_culture <- sum(!is.na(merged_data_matched$culture_reg) & !is.na(merged_data_matched$culture_nat))
+    n_obs_rile <- sum(!is.na(merged_data_matched$rile) & !is.na(merged_data_matched$RILE_position))
+    n_obs_lr <- sum(!is.na(merged_data_matched$lr_ir_nat) & !is.na(merged_data_matched$lr_ir_reg))
+    n_obs_reg <- sum(!is.na(merged_data_matched$culture_reg) & !is.na(merged_data_matched$market_reg))
+    n_obs_nat <- sum(!is.na(merged_data_matched$market_nat) & !is.na(merged_data_matched$culture_nat))
+
+
+
+
+    # Create a data frame for correlations and number of observations
+    correlation_table <- data.frame(
+      Pair = c("market_reg & market_nat", "culture_reg & culture_nat", "rile & RILE_position", 
+               "lr_ir_nat & lr_ir_reg", "culture_reg & market_reg", "market_nat & culture_nat"),
+      Correlation = c(correlation_market, correlation_culture, correlation_rile, 
+                      correlation_lr, correlation_reg, correlation_nat),
+      Observations = c(n_obs_market, n_obs_culture, n_obs_rile, 
+                       n_obs_lr, n_obs_reg, n_obs_nat)
+    )
+
+    # Print correlation table
+    print(correlation_table)
+
+
+
+
+
+
+
+    ```
+
+## Final correlations
+
+These are the final correlations illustrated in Table 5 of the RED codebook.
+
+```{r}
+
+# Rename regionalist.x to regionalist
+merged_data_matched <- merged_data_matched %>%
+  rename(regionalist = regionalist.x)
+
+# Calculate correlations for regionalist = 1
+correlation_market_regionalist1 <- cor(merged_data_matched$market_reg[merged_data_matched$regionalist == 1], 
+                                       merged_data_matched$market_nat[merged_data_matched$regionalist == 1], 
+                                       use = "complete.obs")
+correlation_culture_regionalist1 <- cor(merged_data_matched$culture_reg[merged_data_matched$regionalist == 1], 
+                                        merged_data_matched$culture_nat[merged_data_matched$regionalist == 1], 
+                                        use = "complete.obs")
+correlation_rile_regionalist1 <- cor(merged_data_matched$rile[merged_data_matched$regionalist == 1], 
+                                     merged_data_matched$RILE_position[merged_data_matched$regionalist == 1], 
+                                     use = "complete.obs")
+correlation_lr_regionalist1 <- cor(merged_data_matched$lr_ir_nat[merged_data_matched$regionalist == 1], 
+                                   merged_data_matched$lr_ir_reg[merged_data_matched$regionalist == 1], 
+                                   use = "complete.obs")
+correlation_reg_regionalist1 <- cor(merged_data_matched$culture_reg[merged_data_matched$regionalist == 1], 
+                                    merged_data_matched$market_reg[merged_data_matched$regionalist == 1], 
+                                    use = "complete.obs")
+correlation_nat_regionalist1 <- cor(merged_data_matched$market_nat[merged_data_matched$regionalist == 1], 
+                                    merged_data_matched$culture_nat[merged_data_matched$regionalist == 1], 
+                                    use = "complete.obs")
+
+# Calculate correlations for regionalist = 0
+correlation_market_regionalist0 <- cor(merged_data_matched$market_reg[merged_data_matched$regionalist == 0], 
+                                       merged_data_matched$market_nat[merged_data_matched$regionalist == 0], 
+                                       use = "complete.obs")
+correlation_culture_regionalist0 <- cor(merged_data_matched$culture_reg[merged_data_matched$regionalist == 0], 
+                                        merged_data_matched$culture_nat[merged_data_matched$regionalist == 0], 
+                                        use = "complete.obs")
+correlation_rile_regionalist0 <- cor(merged_data_matched$rile[merged_data_matched$regionalist == 0], 
+                                     merged_data_matched$RILE_position[merged_data_matched$regionalist == 0], 
+                                     use = "complete.obs")
+correlation_lr_regionalist0 <- cor(merged_data_matched$lr_ir_nat[merged_data_matched$regionalist == 0], 
+                                   merged_data_matched$lr_ir_reg[merged_data_matched$regionalist == 0], 
+                                   use = "complete.obs")
+correlation_reg_regionalist0 <- cor(merged_data_matched$culture_reg[merged_data_matched$regionalist == 0], 
+                                    merged_data_matched$market_reg[merged_data_matched$regionalist == 0], 
+                                    use = "complete.obs")
+correlation_nat_regionalist0 <- cor(merged_data_matched$market_nat[merged_data_matched$regionalist == 0], 
+                                    merged_data_matched$culture_nat[merged_data_matched$regionalist == 0], 
+                                    use = "complete.obs")
+
+# Create a data frame for correlations and number of observations
+correlation_table <- data.frame(
+  Pair = rep(c("market_reg & market_nat", "culture_reg & culture_nat", "rile & RILE_position", 
+               "lr_ir_nat & lr_ir_reg", "culture_reg & market_reg", "market_nat & culture_nat"), 2),
+  Correlation = c(correlation_market_regionalist1, correlation_culture_regionalist1, correlation_rile_regionalist1, 
+                  correlation_lr_regionalist1, correlation_reg_regionalist1, correlation_nat_regionalist1,
+                  correlation_market_regionalist0, correlation_culture_regionalist0, correlation_rile_regionalist0, 
+                  correlation_lr_regionalist0, correlation_reg_regionalist0, correlation_nat_regionalist0),
+  Observations = rep(c(n_obs_market, n_obs_culture, n_obs_rile, 
+                       n_obs_lr, n_obs_reg, n_obs_nat), 2),
+  Regionalist = rep(c(1, 0), each = 6)
+)
+
+# Print correlation table
+print(correlation_table)
+
+```
+
+Here we count the regionalist parties for the number of observations in Table 5.
+
+```{r}
+n_regionalist_1 <- sum(merged_data_matched$regionalist == 1)
+
+# Output the count
+print(n_regionalist_1)
+```
